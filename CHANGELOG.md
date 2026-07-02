@@ -5,6 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.1] - 2026-07-01
+
+### Fixed
+
+- Status bar background color now actually applies (0.6.0's color tiers were invisible). VS Code restricts `StatusBarItem.backgroundColor` to only the `error`/`warning` theme colors, so the hardcoded hex values were silently dropped. Replaced with `new ThemeColor('statusBarItem.errorBackground')` (red, in-peak) and `statusBarItem.warningBackground` (orange, within 1h of peak start); foreground is left unset so VS Code auto-selects a readable contrast color.
+- Removed the obsolete `as unknown as ThemeColor` cast and the hardcoded `PEAK_COLORS` hex map that produced no visible effect.
+
+### Changed
+
+- Synced `package-lock.json` version to `0.6.1` (was stale at `0.4.0`/`0.3.0`)
+
 ## [0.6.0] - 2026-07-01
 
 ### Added
@@ -14,7 +25,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- Peak timing text removed from the inline status bar; urgency is now signaled by background color only (red = in peak, pink = within 30 min, orange = within 1 hour)
+- Peak timing text removed from the inline status bar; urgency is now signaled by background color only (red = in peak, orange = within 1 hour of peak start). VS Code limits status bar backgrounds to the `error`/`warning` theme colors, so pink is unavailable there; the ≤30m imminent tier is retained in the tooltip via the 🩷 dot.
 - Peak line moved to the tooltip, prefixed with a colored circle emoji (🔴/🩷/🟠/🟢) mirroring the status bar tier
 - Cache schema bumped to `2.0` to invalidate entries stored under the previous single-window DTO
 

@@ -16,7 +16,7 @@
 ## Features
 
 - Shows token quota usage (e.g. `8% 5h · 15% wk`) for both the rolling 5-hour and weekly windows, or remaining tokens in either mode
-- **Peak color tiers** — status bar background signals the 3x multiplier window: red (in peak), pink (within 30 min), orange (within 1 hour)
+- **Peak color tiers** — status bar background signals the 3x multiplier window: red (in peak), orange (within 1 hour of peak start). Tooltip dots preserve the finer imminent (🩷 ≤30m) vs approaching (🟠 ≤1h) distinction.
 - **Peak line in tooltip** — hover shows the next peak boundary in local time, prefixed with a colored dot matching the tier
 - Automatically refreshes at a configurable interval
 - Secure API key storage via VS Code Secret Storage
@@ -27,7 +27,6 @@
 | -------------------------------- | -------------------------------- |
 | Authenticated, off-peak          | `⬡ 8% 5h · 15% wk` (default bg)   |
 | Peak within 1 hour (orange bg)   | `⬡ 8% 5h · 15% wk`                 |
-| Peak within 30 minutes (pink bg) | `⬡ 8% 5h · 15% wk`                 |
 | During peak (red bg)             | `⬡ 8% 5h · 15% wk`                 |
 | Authenticated, remaining mode    | `⬡ 92% 5h · 85% wk`                |
 | API key not set                  | `⬡ Set API Key` |

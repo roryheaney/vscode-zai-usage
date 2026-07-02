@@ -2,7 +2,7 @@
   "name": "vscode-zai-usage",
   "displayName": "VSCode z.ai Usage",
   "description": "Display z.ai token usage in the status bar",
-  "version": "0.6.0",
+  "version": "0.6.1",
   "publisher": "roryheaney",
   "license": "MIT",
   "icon": "icon.png",

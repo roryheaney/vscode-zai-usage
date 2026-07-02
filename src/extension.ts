@@ -109,19 +109,41 @@ const ONE_DAY_MS = 24 * 60 * 60 * 1000;
 const UNIT_HOURS = 3;
 const UNIT_WEEKS = 6;
 
-/** Peak-status tiers, used to drive both the status bar color and the tooltip dot. */
+/** Peak-status tiers, used to drive the tooltip dot and (collapsed) the status bar color. */
 type PeakTier = "peak" | "imminent" | "approaching" | "off";
 
-/** Status bar highlight colors per peak tier. Pink/orange/red are hardcoded hex because VS
- * Code has no theme tokens for them; each is paired with a foreground that keeps contrast. */
-const PEAK_COLORS: Record<PeakTier, { bg?: string; fg?: string }> = {
-  peak: { bg: "#C72B2B", fg: "#FFFFFF" }, // red — inside the 3x window
-  imminent: { bg: "#FF4D8D", fg: "#1A1A1A" }, // pink — within 30 min of peak
-  approaching: { bg: "#C2410C", fg: "#FFFFFF" }, // orange — within 1 h of peak
-  off: {}, // default theme colors
-};
+/**
+ * Maps each peak tier to a VS Code status bar background `ThemeColor`, or `undefined` for
+ * the default theme background.
+ *
+ * VS Code restricts `StatusBarItem.backgroundColor` to exactly two theme colors
+ * (documented in the `@types/vscode` StatusBarItem docs): `statusBarItem.errorBackground`
+ * and `statusBarItem.warningBackground`. Arbitrary hex or other theme colors are silently
+ * ignored at runtime. The four tiers therefore collapse onto two colors:
+ * - `peak` → error (red) — actively being charged the 3x multiplier.
+ * - `imminent` / `approaching` → warning (orange) — 3x window approaching.
+ * - `off` → `undefined` — default theme background.
+ *
+ * When a background is set, VS Code auto-selects a readable foreground, so no explicit
+ * `color` is assigned.
+ */
+function peakBackgroundThemeColor(
+  tier: PeakTier,
+): vscode.ThemeColor | undefined {
+  switch (tier) {
+    case "peak":
+      return new vscode.ThemeColor("statusBarItem.errorBackground");
+    case "imminent":
+    case "approaching":
+      return new vscode.ThemeColor("statusBarItem.warningBackground");
+    case "off":
+      return undefined;
+  }
+}
 
-/** Colored circle emoji shown in the hover tooltip to mirror the status bar tier. */
+/** Colored circle emoji shown in the hover tooltip to preserve all four tiers (the status
+ *  bar only supports two background colors, so the finer imminent/approaching distinction
+ *  lives here). */
 const PEAK_EMOJI: Record<PeakTier, string> = {
   peak: "🔴",
   imminent: "🩷",
@@ -470,37 +492,30 @@ export function activate(context: vscode.ExtensionContext): void {
   }
 
   /**
-   * Clears any peak-related highlight, restoring the status bar to its default theme colors.
+   * Clears the peak-related background highlight, restoring the status bar to its default
+   * theme background.
    */
   function clearPeakColor(): void {
     statusBarItem.backgroundColor = undefined;
-    statusBarItem.color = undefined;
   }
 
   /**
-   * Highlights the status bar by peak tier, drawing attention to the 3x window.
+   * Highlights the status bar background by peak tier, drawing attention to the 3x window.
    *
-   * - **Red** when inside peak.
-   * - **Pink** within 30 minutes of peak start.
-   * - **Orange** within 1 hour of peak start.
-   * - Default theme colors otherwise.
+   * VS Code supports only two status bar background colors, so the tiers collapse as:
+   * - **Red** (`statusBarItem.errorBackground`) when inside peak.
+   * - **Orange** (`statusBarItem.warningBackground`) within 1 hour of peak start
+   *   (covers both the imminent ≤30m and approaching ≤1h tiers).
+   * - Default theme background otherwise.
    *
-   * Pink/orange/red use hardcoded hex (VS Code has no theme tokens for them); each pairs
-   * with a foreground chosen for legible contrast.
+   * No foreground is set explicitly: per the VS Code API, the status bar auto-selects a
+   * readable foreground when a background color is applied.
    *
    * @param peakInfo - The current {@link PeakInfo}.
    */
   function applyPeakColor(peakInfo: PeakInfo): void {
     const tier = getPeakTier(peakInfo);
-    const colors = PEAK_COLORS[tier];
-    if (!colors.bg) {
-      clearPeakColor();
-      return;
-    }
-    // @types/vscode types backgroundColor as ThemeColor-only, but the runtime accepts hex
-    // strings; pink/orange/red have no matching theme color, so the cast is required.
-    statusBarItem.backgroundColor = colors.bg as unknown as vscode.ThemeColor;
-    statusBarItem.color = colors.fg;
+    statusBarItem.backgroundColor = peakBackgroundThemeColor(tier);
   }
 
   /**
