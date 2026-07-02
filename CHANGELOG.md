@@ -5,6 +5,32 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.0] - 2026-07-01
+
+### Added
+
+- Weekly token quota alongside the 5-hour quota in the status bar (e.g. `8% 5h · 15% wk`). Both `TOKENS_LIMIT` entries are now read and disambiguated by the API `unit` field.
+- Per-window reset countdowns in the tooltip (`5-hour window: 8% used — resets in 2h30m`)
+
+### Changed
+
+- Peak timing text removed from the inline status bar; urgency is now signaled by background color only (red = in peak, pink = within 30 min, orange = within 1 hour)
+- Peak line moved to the tooltip, prefixed with a colored circle emoji (🔴/🩷/🟠/🟢) mirroring the status bar tier
+- Cache schema bumped to `2.0` to invalidate entries stored under the previous single-window DTO
+
+## [0.5.0] - 2026-07-01
+
+### Added
+
+- Peak/off-peak indicator in the status bar showing the next boundary in local time (e.g. `· peak at 11:00 PM` when off-peak, `· off-peak at 3:00 AM` during peak)
+- Status bar highlights as peak (3x multiplier window, 06:00–10:00 UTC daily) approaches: orange within 1 hour, red within 30 minutes
+- `zaiUsage.timezone` setting (IANA identifier, default `America/Los_Angeles`) for DST-accurate local-time display via `Intl.DateTimeFormat`
+- Peak-state line in the status bar tooltip
+
+### Changed
+
+- Fork publisher updated to `roryheaney`
+
 ## [0.4.0] - 2026-05-22
 
 ### Added

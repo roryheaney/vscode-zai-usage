@@ -2,8 +2,8 @@
   "name": "vscode-zai-usage",
   "displayName": "VSCode z.ai Usage",
   "description": "Display z.ai token usage in the status bar",
-  "version": "0.4.0",
-  "publisher": "j4rviscmd",
+  "version": "0.6.0",
+  "publisher": "roryheaney",
   "license": "MIT",
   "icon": "icon.png",
   "repository": {
@@ -85,6 +85,11 @@
             "Display remaining tokens (e.g. 24.7%)"
           ],
           "description": "Whether to display token usage or remaining tokens in the status bar."
+        },
+        "zaiUsage.timezone": {
+          "type": "string",
+          "default": "America/Los_Angeles",
+          "description": "IANA timezone identifier (e.g. America/Los_Angeles) used to display the next peak/off-peak boundary in local time. Set to your timezone for accurate DST-aware display."
         }
       }
     }

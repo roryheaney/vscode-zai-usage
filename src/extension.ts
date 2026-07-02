@@ -4,12 +4,21 @@ import * as vscode from "vscode";
  * Represents a single usage limit entry returned by the z.ai quota API.
  */
 interface ZaiLimit {
-  /** The type identifier of the limit (e.g. `"TOKENS_LIMIT"`). */
+  /** The type identifier of the limit (e.g. `"TOKENS_LIMIT"`, `"TIME_LIMIT"`). */
   type: string;
-  /** The current usage as a decimal percentage (e.g. `0.753` means 75.3 %). */
-  percentage: number;
+  /**
+   * The unit code of the limit window. Observed values from the z.ai contract:
+   * - `3` — hours (the rolling 5-hour token window)
+   * - `6` — weeks (the rolling weekly token window)
+   * Used to disambiguate the two `TOKENS_LIMIT` entries the API returns.
+   */
+  unit?: number;
+  /** Quantity of the window (e.g. `5` for a 5-hour window, `1` for a 1-week window). */
+  number?: number;
+  /** The current usage as a whole-number percentage (e.g. `8` means 8 %). */
+  percentage?: number;
   /** Unix timestamp (ms) at which this limit will reset. */
-  nextResetTime: number;
+  nextResetTime?: number;
 }
 
 /**
@@ -42,23 +51,147 @@ interface CacheData {
 }
 
 /**
- * Simplified token-usage statistics derived from a {@link ZaiApiResponse}.
+ * A single token-quota window derived from a {@link ZaiApiResponse} limit entry.
  */
-interface UsageData {
-  /** Rounded token usage percentage (one decimal place, e.g. `75.3`). */
+interface QuotaWindow {
+  /** Whole-number token usage percentage, as returned by the API (e.g. `8`). */
   percentage: number;
-  /** Unix timestamp (ms) of the next quota reset, or `null` if unknown. */
+  /** Unix timestamp (ms) of the next reset for this window, or `null` if unknown. */
   nextResetTime: number | null;
 }
 
+/**
+ * Simplified token-usage statistics derived from a {@link ZaiApiResponse}.
+ *
+ * z.ai returns two `TOKENS_LIMIT` entries — the rolling 5-hour window (`unit: 3`) and the
+ * rolling weekly window (`unit: 6`). Either may be `null` when absent from the response.
+ */
+interface UsageData {
+  /** The rolling 5-hour token window (`TOKENS_LIMIT`, `unit: 3`), or `null` if absent. */
+  hourly: QuotaWindow | null;
+  /** The rolling weekly token window (`TOKENS_LIMIT`, `unit: 6`), or `null` if absent. */
+  weekly: QuotaWindow | null;
+}
+
+/**
+ * Describes the user's current position relative to the daily z.ai peak window.
+ */
+interface PeakInfo {
+  /** `true` when the current instant falls inside the daily peak window. */
+  isInPeak: boolean;
+  /** UTC ms timestamp of the next boundary: peak start when off-peak, peak end when on-peak. */
+  nextBoundary: number;
+}
+
 /** Schema version embedded in every cache entry; increment to bust old caches. */
-const CACHE_VERSION = "1.0";
+const CACHE_VERSION = "2.0";
 /** Key used to store the cache object in `vscode.ExtensionContext.globalState`. */
 const CACHE_KEY = "zaiUsage.cache";
 /** Key used to store the API key in `vscode.ExtensionContext.secrets`. */
 const API_KEY_SECRET = "zaiUsage.apiKey";
 /** The z.ai quota/limit API endpoint. */
 const API_URL = "https://api.z.ai/api/monitor/usage/quota/limit";
+
+/**
+ * z.ai peak hours are 14:00–18:00 daily in UTC+8 (China Standard Time, which does not
+ * observe DST). This is therefore a fixed daily window of 06:00–10:00 UTC. Working in UTC
+ * keeps the in/out-of-peak decision unambiguous; only the displayed time is localized.
+ */
+const PEAK_START_UTC_HOUR = 6;
+const PEAK_END_UTC_HOUR = 10;
+/** Milliseconds in one day, used to advance a UTC boundary to the following day. */
+const ONE_DAY_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * `unit` codes used by the z.ai quota API to distinguish the two `TOKENS_LIMIT` windows.
+ * Observed from the documented contract: `3` = the rolling 5-hour window, `6` = weekly.
+ */
+const UNIT_HOURS = 3;
+const UNIT_WEEKS = 6;
+
+/** Peak-status tiers, used to drive both the status bar color and the tooltip dot. */
+type PeakTier = "peak" | "imminent" | "approaching" | "off";
+
+/** Status bar highlight colors per peak tier. Pink/orange/red are hardcoded hex because VS
+ * Code has no theme tokens for them; each is paired with a foreground that keeps contrast. */
+const PEAK_COLORS: Record<PeakTier, { bg?: string; fg?: string }> = {
+  peak: { bg: "#C72B2B", fg: "#FFFFFF" }, // red — inside the 3x window
+  imminent: { bg: "#FF4D8D", fg: "#1A1A1A" }, // pink — within 30 min of peak
+  approaching: { bg: "#C2410C", fg: "#FFFFFF" }, // orange — within 1 h of peak
+  off: {}, // default theme colors
+};
+
+/** Colored circle emoji shown in the hover tooltip to mirror the status bar tier. */
+const PEAK_EMOJI: Record<PeakTier, string> = {
+  peak: "🔴",
+  imminent: "🩷",
+  approaching: "🟠",
+  off: "🟢",
+};
+
+/**
+ * Computes the user's current position relative to the daily z.ai peak window.
+ *
+ * Peak is a fixed 06:00–10:00 UTC window. The {@link PeakInfo.nextBoundary} is the next
+ * transition: the upcoming peak start when currently off-peak, or the upcoming peak end
+ * when currently in peak. All comparisons use absolute UTC instants, so the result is
+ * independent of the host machine's local timezone.
+ *
+ * @param now - The reference instant (defaults to the current time).
+ * @returns A {@link PeakInfo} describing the peak state and next boundary.
+ */
+function getPeakInfo(now: Date = new Date()): PeakInfo {
+  const nowMs = now.getTime();
+  const startOfTodayUtc = Date.UTC(
+    now.getUTCFullYear(),
+    now.getUTCMonth(),
+    now.getUTCDate(),
+  );
+  const peakStartToday = startOfTodayUtc + PEAK_START_UTC_HOUR * 60 * 60 * 1000;
+  const peakEndToday = startOfTodayUtc + PEAK_END_UTC_HOUR * 60 * 60 * 1000;
+
+  let nextBoundary: number;
+  if (nowMs < peakStartToday) {
+    // Before today's peak: next boundary is peak start today.
+    nextBoundary = peakStartToday;
+  } else if (nowMs < peakEndToday) {
+    // Inside today's peak: next boundary is peak end today.
+    nextBoundary = peakEndToday;
+  } else {
+    // After today's peak: next boundary is peak start tomorrow.
+    nextBoundary = peakStartToday + ONE_DAY_MS;
+  }
+
+  return {
+    isInPeak: nowMs >= peakStartToday && nowMs < peakEndToday,
+    nextBoundary,
+  };
+}
+
+/**
+ * Maps the current {@link PeakInfo} to a coarse {@link PeakTier} used for coloring.
+ *
+ * - `peak` — currently inside the 06:00–10:00 UTC window.
+ * - `imminent` — off-peak but within 30 minutes of the next peak start.
+ * - `approaching` — off-peak but within 1 hour of the next peak start.
+ * - `off` — otherwise.
+ *
+ * @param peakInfo - The current {@link PeakInfo}.
+ * @returns The {@link PeakTier} describing the current urgency.
+ */
+function getPeakTier(peakInfo: PeakInfo): PeakTier {
+  if (peakInfo.isInPeak) {
+    return "peak";
+  }
+  const msUntilPeak = peakInfo.nextBoundary - Date.now();
+  if (msUntilPeak <= 30 * 60 * 1000) {
+    return "imminent";
+  }
+  if (msUntilPeak <= 60 * 60 * 1000) {
+    return "approaching";
+  }
+  return "off";
+}
 
 /**
  * Activates the extension.
@@ -153,15 +286,35 @@ export function activate(context: vscode.ExtensionContext): void {
       return null;
     }
 
-    const tokenLimit = limits.find((l) => l.type === "TOKENS_LIMIT");
-    if (!tokenLimit) {
+    const tokenLimits = limits.filter((l) => l.type === "TOKENS_LIMIT");
+    if (tokenLimits.length === 0) {
       return null;
     }
 
-    return {
-      percentage: Math.round(tokenLimit.percentage * 10) / 10,
-      nextResetTime: tokenLimit.nextResetTime ?? null,
+    // z.ai returns two TOKENS_LIMIT entries; disambiguate by `unit` (3 = 5h, 6 = weekly).
+    const toWindow = (l: ZaiLimit): QuotaWindow | null => {
+      if (l.percentage == null) {
+        return null;
+      }
+      return {
+        percentage: l.percentage,
+        nextResetTime: l.nextResetTime ?? null,
+      };
     };
+
+    const hourly = toWindow(
+      tokenLimits.find((l) => l.unit === UNIT_HOURS) ?? tokenLimits[0],
+    );
+    // Fall back to the second TOKENS_LIMIT entry for weekly when no explicit unit match exists.
+    const weeklyCandidate =
+      tokenLimits.find((l) => l.unit === UNIT_WEEKS) ?? tokenLimits[1];
+    const weekly = weeklyCandidate ? toWindow(weeklyCandidate) : null;
+
+    if (!hourly && !weekly) {
+      return null;
+    }
+
+    return { hourly, weekly };
   }
 
   /**
@@ -184,9 +337,13 @@ export function activate(context: vscode.ExtensionContext): void {
     if (Date.now() - cache.timestamp >= getRefreshInterval()) {
       return false;
     }
-    // If nextResetTime stored in the cache is in the past, invalidate and fetch fresh data.
+    // If any stored reset time is in the past, invalidate and fetch fresh data.
     const usage = extractUsageData(cache.data);
-    if (usage?.nextResetTime && usage.nextResetTime <= Date.now()) {
+    const resetTimes = [
+      usage?.hourly?.nextResetTime,
+      usage?.weekly?.nextResetTime,
+    ];
+    if (resetTimes.some((t) => t && t <= Date.now())) {
       return false;
     }
     return true;
@@ -194,14 +351,20 @@ export function activate(context: vscode.ExtensionContext): void {
 
   /**
    * Formats the time remaining until the next usage quota reset into a short
-   * human-readable string such as `"(2h30m)"` or `"(45m)"`.
+   * human-readable string. Parts are space-separated for readability.
+   *
+   * - **≤ 24 h**: hours and minutes only, e.g. `"(2h 30m)"`, `"(45m)"`.
+   * - **> 24 h**: days, hours, and minutes, e.g. `"(6d 3h 45m)"`, `"(6d 45m)"`.
+   *
+   * The day unit is shown once the remaining time strictly exceeds 24 h, so the
+   * exact 24-hour boundary renders as `"(24h 0m)"`.
    *
    * Returns an empty string when `nextResetTime` is falsy, non-positive, or
    * already in the past.
    *
    * @param nextResetTime - The Unix timestamp (in milliseconds) of the next reset,
    *   or `null` if unknown.
-   * @returns A formatted countdown string like `"(1h5m)"`, or `""` if not applicable.
+   * @returns A formatted countdown string like `"(1h 5m)"` or `"(6d 1h 5m)"`, or `""`.
    */
   function formatResetTime(nextResetTime: number | null): string {
     if (!nextResetTime || nextResetTime <= 0) {
@@ -212,12 +375,132 @@ export function activate(context: vscode.ExtensionContext): void {
       return "";
     }
     const diffSec = Math.floor(diffMs / 1000);
-    const diffHours = Math.floor(diffSec / 3600);
+    const diffDays = Math.floor(diffSec / 86400);
+    const diffHours = Math.floor((diffSec % 86400) / 3600);
     const diffMins = Math.floor((diffSec % 3600) / 60);
     const parts: string[] = [];
-    if (diffHours > 0) parts.push(`${diffHours}h`);
+    if (diffDays > 0) {
+      parts.push(`${diffDays}d`);
+    }
+    if (diffHours > 0) {
+      parts.push(`${diffHours}h`);
+    }
     parts.push(`${diffMins}m`);
-    return `(${parts.join("")})`;
+    return `(${parts.join(" ")})`;
+  }
+
+  /**
+   * Builds an inline segment for a single quota window, e.g. `"8% 5h"` or `"92% wk"`
+   * (remaining mode), applying the configured display mode.
+   *
+   * @param window - The {@link QuotaWindow} to render.
+   * @param label - Short window tag appended after the percentage (e.g. `"5h"`, `"wk"`).
+   * @param isRemaining - When `true`, show remaining (100 − percentage) instead of usage.
+   * @returns The formatted segment string.
+   */
+  function formatWindowInline(
+    window: QuotaWindow,
+    label: string,
+    isRemaining: boolean,
+  ): string {
+    const value = isRemaining ? 100 - window.percentage : window.percentage;
+    return `${value}% ${label}`;
+  }
+
+  /**
+   * Builds a tooltip line for a quota window with its reset countdown, e.g.
+   * `"5h window: 8% — resets in 2h30m"`.
+   *
+   * @param name - Human-readable window name (e.g. `"5-hour"`, `"Weekly"`).
+   * @param window - The {@link QuotaWindow} to describe.
+   * @param isRemaining - When `true`, describe remaining rather than usage.
+   * @returns The tooltip line, or `""` when the window is absent.
+   */
+  function windowTooltipLine(
+    name: string,
+    window: QuotaWindow | null,
+    isRemaining: boolean,
+  ): string {
+    if (!window) {
+      return "";
+    }
+    const value = isRemaining ? 100 - window.percentage : window.percentage;
+    const noun = isRemaining ? "remaining" : "used";
+    const reset = formatResetTime(window.nextResetTime);
+    const resetStr = reset ? ` — resets in ${reset.replace(/[()]/g, "")}` : "";
+    return `${name} window: ${value}% ${noun}${resetStr}`;
+  }
+
+  /**
+   * Formats a UTC ms instant into a short local clock time using the configured timezone.
+   *
+   * Uses `Intl.DateTimeFormat` with the {@link zaiUsage.timezone} IANA identifier (default
+   * `America/Los_Angeles`). The bundled ICU tz database handles DST transitions automatically,
+   * so no manual UTC-offset math is required.
+   *
+   * @param utcInstantMs - The UTC ms timestamp to format.
+   * @returns A localized time string such as `"11:00 PM"`.
+   */
+  function formatLocalTime(utcInstantMs: number): string {
+    const timezone = vscode.workspace
+      .getConfiguration("zaiUsage")
+      .get<string>("timezone", "America/Los_Angeles");
+    return new Intl.DateTimeFormat("en-US", {
+      timeZone: timezone,
+      hour: "numeric",
+      minute: "2-digit",
+    }).format(new Date(utcInstantMs));
+  }
+
+  /**
+   * Builds the peak line shown in the hover tooltip, prefixed with a colored circle emoji
+   * that mirrors the current status bar tier (the only reliable way to convey color inside
+   * a VS Code hover, which does not support background colors).
+   *
+   * @param peakInfo - The current {@link PeakInfo}.
+   * @returns A tooltip line such as `"🟠 Peak (3x) starts at 11:00 PM"`.
+   */
+  function peakTooltipLine(peakInfo: PeakInfo): string {
+    const tier = getPeakTier(peakInfo);
+    const time = formatLocalTime(peakInfo.nextBoundary);
+    const dot = PEAK_EMOJI[tier];
+    return peakInfo.isInPeak
+      ? `${dot} In peak (3x) — off-peak at ${time}`
+      : `${dot} Peak (3x) starts at ${time}`;
+  }
+
+  /**
+   * Clears any peak-related highlight, restoring the status bar to its default theme colors.
+   */
+  function clearPeakColor(): void {
+    statusBarItem.backgroundColor = undefined;
+    statusBarItem.color = undefined;
+  }
+
+  /**
+   * Highlights the status bar by peak tier, drawing attention to the 3x window.
+   *
+   * - **Red** when inside peak.
+   * - **Pink** within 30 minutes of peak start.
+   * - **Orange** within 1 hour of peak start.
+   * - Default theme colors otherwise.
+   *
+   * Pink/orange/red use hardcoded hex (VS Code has no theme tokens for them); each pairs
+   * with a foreground chosen for legible contrast.
+   *
+   * @param peakInfo - The current {@link PeakInfo}.
+   */
+  function applyPeakColor(peakInfo: PeakInfo): void {
+    const tier = getPeakTier(peakInfo);
+    const colors = PEAK_COLORS[tier];
+    if (!colors.bg) {
+      clearPeakColor();
+      return;
+    }
+    // @types/vscode types backgroundColor as ThemeColor-only, but the runtime accepts hex
+    // strings; pink/orange/red have no matching theme color, so the cast is required.
+    statusBarItem.backgroundColor = colors.bg as unknown as vscode.ThemeColor;
+    statusBarItem.color = colors.fg;
   }
 
   /**
@@ -358,8 +641,9 @@ export function activate(context: vscode.ExtensionContext): void {
    * Possible outcomes:
    * - **No API key**: delegates to {@link applyNoApiKeyState} to prompt the user.
    * - **Fetch failure**: displays a dash and an error tooltip.
-   * - **Success**: renders the usage percentage and optional reset countdown; also
-   *   shows a tooltip with full details and the configured refresh interval.
+   * - **Success**: renders the 5-hour and weekly quota windows inline (e.g. `8% 5h · 15% wk`),
+   *   applies the peak-tier background color, and shows a tooltip with per-window reset
+   *   countdowns, a colored peak line, and the configured refresh interval.
    *
    * After a successful live API call ({@link fetchUsage} returns `apiCalled: true`),
    * the polling interval is restarted via {@link startInterval} so that the next
@@ -372,39 +656,45 @@ export function activate(context: vscode.ExtensionContext): void {
 
     if (noApiKey) {
       applyNoApiKeyState();
+      clearPeakColor();
     } else if (usage === null) {
       statusBarItem.command = "zaiUsage.updateStatusBar";
       statusBarItem.text = getLabel("-");
       statusBarItem.tooltip =
         "Unable to fetch z.ai usage data (click to refresh)";
+      clearPeakColor();
     } else {
       statusBarItem.command = "zaiUsage.updateStatusBar";
       const refreshSec = getRefreshInterval() / 1000;
-      const resetStr = formatResetTime(usage.nextResetTime);
+      const peakInfo = getPeakInfo();
 
       // Get display mode setting (default: "usage")
       const displayMode = vscode.workspace
         .getConfiguration("zaiUsage")
         .get<string>("displayMode", "usage");
-
-      // Calculate display percentage based on display mode
       const isRemaining = displayMode === "remaining";
-      const displayPercentage = isRemaining
-        ? Math.round((100 - usage.percentage) * 10) / 10
-        : usage.percentage;
 
-      const suffix = resetStr
-        ? `${displayPercentage}% ${resetStr}`
-        : `${displayPercentage}%`;
-      statusBarItem.text = getLabel(suffix);
+      // Inline: both quota windows labeled, no peak text (color signals peak urgency).
+      const segments: string[] = [];
+      if (usage.hourly) {
+        segments.push(formatWindowInline(usage.hourly, "5h", isRemaining));
+      }
+      if (usage.weekly) {
+        segments.push(formatWindowInline(usage.weekly, "wk", isRemaining));
+      }
+      statusBarItem.text = getLabel(segments.join(" · ") || "-");
 
-      // Build tooltip text
-      const resetTooltip = resetStr
-        ? ` — resets in ${resetStr.replace(/[()]/g, "")}`
-        : "";
-      statusBarItem.tooltip =
-        `z.ai token ${displayMode}: ${displayPercentage}%${resetTooltip} ` +
-        `\n(auto-refreshes every ${refreshSec}s. click to refresh immediately)`;
+      // Highlight the status bar by peak tier (red in peak, pink ≤30m, orange ≤1h).
+      applyPeakColor(peakInfo);
+
+      // Build tooltip: per-window detail + colored peak line + refresh note.
+      const lines = [
+        windowTooltipLine("5-hour", usage.hourly, isRemaining),
+        windowTooltipLine("Weekly", usage.weekly, isRemaining),
+        peakTooltipLine(peakInfo),
+        `auto-refreshes every ${refreshSec}s. click to refresh immediately`,
+      ].filter(Boolean);
+      statusBarItem.tooltip = lines.join("\n");
     }
 
     if (apiCalled) {
@@ -501,9 +791,9 @@ export function activate(context: vscode.ExtensionContext): void {
     /**
      * Listens for workspace configuration changes and re-applies them immediately.
      *
-     * When `zaiUsage.refreshInterval`, `zaiUsage.useIcon`, or `zaiUsage.displayMode` changes,
-     * the status bar is refreshed and the polling interval is restarted so the new settings take
-     * effect without requiring a window reload.
+     * When `zaiUsage.refreshInterval`, `zaiUsage.useIcon`, `zaiUsage.displayMode`, or
+     * `zaiUsage.timezone` changes, the status bar is refreshed and the polling interval is
+     * restarted so the new settings take effect without requiring a window reload.
      *
      * When `zaiUsage.statusBarPriority` changes, the user is notified that a window
      * reload is required for the new priority to take effect, because the priority is
@@ -513,7 +803,8 @@ export function activate(context: vscode.ExtensionContext): void {
       if (
         e.affectsConfiguration("zaiUsage.refreshInterval") ||
         e.affectsConfiguration("zaiUsage.useIcon") ||
-        e.affectsConfiguration("zaiUsage.displayMode")
+        e.affectsConfiguration("zaiUsage.displayMode") ||
+        e.affectsConfiguration("zaiUsage.timezone")
       ) {
         updateStatusBar();
         startInterval();
